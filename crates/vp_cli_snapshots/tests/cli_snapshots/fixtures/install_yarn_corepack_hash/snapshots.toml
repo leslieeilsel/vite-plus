@@ -1,0 +1,22 @@
+[[case]]
+name = "install_yarn_corepack_hash"
+vp = "global"
+env = { YARN_ENABLE_TELEMETRY = "0" }
+steps = [
+  { argv = ["vpt", "rm", "-rf", "$VP_HOME/package_manager/yarn/4.17.1", "$VP_HOME/package_manager/yarn/4.17.1.lock"], comment = "Ensure the Corepack-pinned Yarn version is not cached", snapshot = false },
+  { argv = ["vpt", "stat-file", "$VP_HOME/package_manager/yarn/4.17.1", "--assert", "missing"], comment = "Yarn 4.17.1 starts uncached" },
+  { argv = ["vp", "install"], comment = "A cold install accepts the hash written by Corepack", timeout = 120000 },
+  { argv = ["vpt", "stat-file", "$VP_HOME/package_manager/yarn/4.17.1/yarn/bin/yarn.js", "--assert", "file"], comment = "The verified Yarn CLI binary is cached" },
+]
+
+[[case]]
+name = "run_yarn_corepack_hash"
+vp = "global"
+env = { YARN_ENABLE_TELEMETRY = "0" }
+steps = [
+  { argv = ["vpt", "rm", "-rf", "$VP_HOME/package_manager/yarn/4.17.1", "$VP_HOME/package_manager/yarn/4.17.1.lock"], comment = "Ensure the Corepack-pinned Yarn version is not cached", snapshot = false },
+  { argv = ["vpt", "stat-file", "$VP_HOME/package_manager/yarn/4.17.1", "--assert", "missing"], comment = "Yarn 4.17.1 starts uncached" },
+  { argv = ["vp", "run", "smoke"], comment = "A cold vp run accepts the hash and executes the task", timeout = 120000 },
+  { argv = ["vpt", "stat-file", "$VP_HOME/package_manager/yarn/4.17.1/yarn/bin/yarn.js", "--assert", "file"], comment = "vp run finalized the verified Yarn cache" },
+  { argv = ["vp", "run", "smoke"], comment = "A warm vp run reuses the cached Yarn binary" },
+]
