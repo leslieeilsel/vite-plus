@@ -2,19 +2,19 @@
 
 ## `vp migrate --no-interactive --no-agent --no-editor --no-hooks`
 
-reject migration from a workspace member before changing files
+vp migrate rejects a workspace member before it changes files
 
 **Exit code:** 1
 
 ```
 VITE+ - The Unified Toolchain for the Web
 
-Cannot migrate a workspace member independently. Run `vp migrate` from the workspace root at <workspace>.
+Vite+ cannot migrate a workspace member. Run `vp migrate` from the workspace root at <workspace>.
 ```
 
 ## `vpt print-file ../../package.json`
 
-workspace root remains unchanged
+the workspace root package.json is unchanged
 
 ```
 {
@@ -28,7 +28,7 @@ workspace root remains unchanged
 
 ## `vpt print-file package.json`
 
-workspace member remains unchanged
+the workspace member package.json is unchanged
 
 ```
 {
@@ -42,7 +42,7 @@ workspace member remains unchanged
 
 ## `vpt stat-file ../../pnpm-workspace.yaml --assert missing`
 
-no package-manager files are created at the workspace root
+the migration created no package-manager files at the workspace root
 
 ```
 ../../pnpm-workspace.yaml: missing

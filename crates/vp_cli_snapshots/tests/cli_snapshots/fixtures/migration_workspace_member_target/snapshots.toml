@@ -10,24 +10,24 @@ steps = [
     "--no-agent",
     "--no-editor",
     "--no-hooks",
-  ], comment = "reject migration from a workspace member before changing files", continue-on-failure = true },
+  ], comment = "vp migrate rejects a workspace member before it changes files", continue-on-failure = true },
   { argv = [
     "vpt",
     "print-file",
     "../../package.json",
-  ], comment = "workspace root remains unchanged", continue-on-failure = true },
+  ], comment = "the workspace root package.json is unchanged", continue-on-failure = true },
   { argv = [
     "vpt",
     "print-file",
     "package.json",
-  ], comment = "workspace member remains unchanged", continue-on-failure = true },
+  ], comment = "the workspace member package.json is unchanged", continue-on-failure = true },
   { argv = [
     "vpt",
     "stat-file",
     "../../pnpm-workspace.yaml",
     "--assert",
     "missing",
-  ], comment = "no package-manager files are created at the workspace root" },
+  ], comment = "the migration created no package-manager files at the workspace root" },
 ]
 
 [[case]]
@@ -43,22 +43,22 @@ steps = [
     "--no-agent",
     "--no-editor",
     "--no-hooks",
-  ], comment = "reject an explicit workspace-member target before changing files", continue-on-failure = true },
+  ], comment = "vp migrate rejects an explicit workspace-member target before it changes files", continue-on-failure = true },
   { argv = [
     "vpt",
     "print-file",
     "../../package.json",
-  ], comment = "workspace root remains unchanged", continue-on-failure = true },
+  ], comment = "the workspace root package.json is unchanged", continue-on-failure = true },
   { argv = [
     "vpt",
     "print-file",
     "package.json",
-  ], comment = "workspace member remains unchanged", continue-on-failure = true },
+  ], comment = "the workspace member package.json is unchanged", continue-on-failure = true },
   { argv = [
     "vpt",
     "stat-file",
     "../../pnpm-workspace.yaml",
     "--assert",
     "missing",
-  ], comment = "no package-manager files are created at the workspace root" },
+  ], comment = "the migration created no package-manager files at the workspace root" },
 ]

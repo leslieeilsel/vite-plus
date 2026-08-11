@@ -1049,7 +1049,7 @@ async function main() {
     path.resolve(projectPath) !== path.resolve(workspaceInfoOptional.rootDir)
   ) {
     cancelAndExit(
-      `Cannot migrate a workspace member independently. Run \`vp migrate\` from the workspace root at ${workspaceInfoOptional.rootDir}.`,
+      `Vite+ cannot migrate a workspace member. Run \`vp migrate\` from the workspace root at ${workspaceInfoOptional.rootDir}.`,
       1,
     );
   }
