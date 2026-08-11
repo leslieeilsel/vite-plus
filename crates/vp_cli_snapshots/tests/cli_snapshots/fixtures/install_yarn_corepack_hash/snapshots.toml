@@ -31,3 +31,14 @@ steps = [
   { argv = ["vpt", "stat-file", "$VP_HOME/package_manager/yarn/4.17.1/yarn/bin/yarn.js", "--assert", "file"], comment = "vp run finalized the verified Yarn cache" },
   { argv = ["vp", "run", "smoke"], comment = "A warm vp run reuses the cached Yarn binary" },
 ]
+
+[[case]]
+name = "run_yarn_corepack_hash_mismatch"
+vp = "global"
+env = { YARN_ENABLE_TELEMETRY = "0" }
+steps = [
+  { argv = ["vpt", "rm", "-rf", "$VP_HOME/package_manager/yarn/4.17.1", "$VP_HOME/package_manager/yarn/4.17.1.lock"], comment = "Ensure the Corepack-pinned Yarn version is not cached", snapshot = false },
+  { argv = ["vp", "install"], comment = "Cache the verified Yarn CLI", timeout = 120000, snapshot = false },
+  { argv = ["vpt", "write-file", "$VP_HOME/package_manager/yarn/4.17.1/yarn/bin/yarn.js", "tampered"], comment = "Replace the cached CLI with content the pin does not cover", snapshot = false },
+  { argv = ["vp", "run", "smoke"], comment = "vp run reports the integrity failure and never starts the task", continue-on-failure = true },
+]
