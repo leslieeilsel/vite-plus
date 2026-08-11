@@ -1,4 +1,7 @@
-use std::{path::Path, time::Duration};
+use std::{
+    path::{Component, Path},
+    time::Duration,
+};
 
 use backon::{ExponentialBuilder, Retryable};
 use flate2::read::GzDecoder;
@@ -294,6 +297,61 @@ fn extract_tgz(tgz_file: impl AsRef<Path>, target_dir: impl AsRef<Path>) -> Resu
     Ok(())
 }
 
+/// Extract exactly one regular file from a tgz archive.
+///
+/// Unlike [`extract_tgz`], archive-controlled paths and links are never written.
+/// This is used when an integrity pin covers one file inside an otherwise
+/// unauthenticated archive.
+fn extract_tgz_file(
+    tgz_file: impl AsRef<Path>,
+    archive_file: impl AsRef<Path>,
+    target_file: impl AsRef<Path>,
+) -> Result<(), Error> {
+    let tgz_file = tgz_file.as_ref();
+    let archive_file = archive_file.as_ref();
+    let target_file = target_file.as_ref();
+    tracing::debug!("Extract {:?} from tgz {:?} to {:?}", archive_file, tgz_file, target_file);
+
+    let file = std::fs::File::open(tgz_file)?;
+    let tar_stream = GzDecoder::new(file);
+    let mut archive = Archive::new(tar_stream);
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        if entry.path()?.as_ref() != archive_file {
+            continue;
+        }
+        if !entry.header().entry_type().is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "package archive CLI entry is not a regular file",
+            )
+            .into());
+        }
+
+        if let Some(parent) = target_file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut output =
+            std::fs::OpenOptions::new().write(true).create_new(true).open(target_file)?;
+        std::io::copy(&mut entry, &mut output)?;
+        tracing::debug!("Extract tgz file finished");
+        return Ok(());
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "package archive does not contain the expected CLI entry",
+    )
+    .into())
+}
+
+#[derive(Clone, Copy)]
+enum TgzExtraction<'a> {
+    Archive { expected_hash: Option<&'a str> },
+    File { path: &'a Path, expected_hash: Option<&'a str> },
+}
+
 /// Download a tgz file from a URL and extract it to a target directory with optional hash verification.
 ///
 /// # Arguments
@@ -311,13 +369,52 @@ pub(crate) async fn download_and_extract_tgz_with_hash(
     expected_hash: Option<&str>,
     message: Option<&str>,
 ) -> Result<(), Error> {
-    let target_dir = target_dir.as_ref().to_path_buf();
-    tracing::debug!(
-        "Start download and extract {} to {:?}, expected hash: {:?}",
+    download_and_extract_tgz(
         url,
-        target_dir,
-        expected_hash
-    );
+        target_dir.as_ref(),
+        TgzExtraction::Archive { expected_hash },
+        message,
+    )
+    .await
+}
+
+/// Download a tgz archive, extract only `archive_file`, and verify that file.
+///
+/// The selected path must be a safe relative path made entirely of normal path
+/// components. All other archive entries are ignored.
+pub(crate) async fn download_and_extract_tgz_file_with_hash(
+    url: &str,
+    target_dir: impl AsRef<Path>,
+    archive_file: impl AsRef<Path>,
+    expected_hash: Option<&str>,
+    message: Option<&str>,
+) -> Result<(), Error> {
+    let archive_file = archive_file.as_ref();
+    if archive_file.as_os_str().is_empty()
+        || !archive_file.components().all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(Error::InvalidArgument(
+            "archive file path must be a safe relative path".into(),
+        ));
+    }
+
+    download_and_extract_tgz(
+        url,
+        target_dir.as_ref(),
+        TgzExtraction::File { path: archive_file, expected_hash },
+        message,
+    )
+    .await
+}
+
+async fn download_and_extract_tgz(
+    url: &str,
+    target_dir: &Path,
+    extraction: TgzExtraction<'_>,
+    message: Option<&str>,
+) -> Result<(), Error> {
+    let target_dir = target_dir.to_path_buf();
+    tracing::debug!("Start download and extract {} to {:?}", url, target_dir);
 
     // This is the single retry layer for the whole download → verify → extract
     // pipeline: each attempt does one download (no nested retry — see
@@ -326,27 +423,25 @@ pub(crate) async fn download_and_extract_tgz_with_hash(
     // attempt. A 404 (version not found) and permanent config errors fail fast
     // and propagate unchanged so the caller in `package_manager.rs` can map a
     // 404 to `PackageManagerVersionNotFound`.
-    (|| async {
-        download_and_extract_tgz_with_hash_once(url, &target_dir, expected_hash, message).await
-    })
-    .retry(
-        ExponentialBuilder::default()
-            .with_jitter()
-            .with_min_delay(Duration::from_millis(500))
-            .with_max_times(3),
-    )
-    .when(is_retryable_download_error)
-    .await
+    (|| async { download_and_extract_tgz_once(url, &target_dir, extraction, message).await })
+        .retry(
+            ExponentialBuilder::default()
+                .with_jitter()
+                .with_min_delay(Duration::from_millis(500))
+                .with_max_times(3),
+        )
+        .when(is_retryable_download_error)
+        .await
 }
 
 /// A single download → verify → extract attempt.
 ///
 /// Starts from clean state by removing and recreating `target_dir`, so a
 /// partially-extracted or corrupt prior attempt cannot interfere with a retry.
-async fn download_and_extract_tgz_with_hash_once(
+async fn download_and_extract_tgz_once(
     url: &str,
     target_dir: &Path,
-    expected_hash: Option<&str>,
+    extraction: TgzExtraction<'_>,
     message: Option<&str>,
 ) -> Result<(), Error> {
     // Reset target directory so a partial prior attempt can't interfere.
@@ -356,25 +451,45 @@ async fn download_and_extract_tgz_with_hash_once(
     fs::create_dir_all(target_dir).await?;
 
     // Download the tgz file with a single attempt (no internal retry). The
-    // pipeline retry in `download_and_extract_tgz_with_hash` owns all retries;
+    // pipeline retry in `download_and_extract_tgz` owns all retries;
     // letting `download_file` retry here too would nest two retry layers and
     // multiply attempts (up to N×M downloads) for a persistent failure.
     let tgz_file = target_dir.join("package.tgz");
     let client = HttpClient::with_config(0, 0);
     client.download_file(url, &tgz_file, message).await?;
 
-    // Verify hash if provided
-    if let Some(expected_hash) = expected_hash {
-        verify_file_hash(&tgz_file, expected_hash).await?;
-    }
+    match extraction {
+        TgzExtraction::Archive { expected_hash } => {
+            if let Some(expected_hash) = expected_hash {
+                verify_file_hash(&tgz_file, expected_hash).await?;
+            }
 
-    // Extract the tgz file to the target directory
-    let tgz_file_for_extract = tgz_file.clone();
-    let target_dir_for_extract = target_dir.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        extract_tgz(&tgz_file_for_extract, &target_dir_for_extract)
-    })
-    .await??;
+            let tgz_file_for_extract = tgz_file.clone();
+            let target_dir_for_extract = target_dir.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                extract_tgz(&tgz_file_for_extract, &target_dir_for_extract)
+            })
+            .await??;
+        }
+        TgzExtraction::File { path, expected_hash } => {
+            let target_file = target_dir.join(path);
+            let tgz_file_for_extract = tgz_file.clone();
+            let archive_file_for_extract = path.to_path_buf();
+            let target_file_for_extract = target_file.clone();
+            tokio::task::spawn_blocking(move || {
+                extract_tgz_file(
+                    &tgz_file_for_extract,
+                    &archive_file_for_extract,
+                    &target_file_for_extract,
+                )
+            })
+            .await??;
+
+            if let Some(expected_hash) = expected_hash {
+                verify_file_hash(&target_file, expected_hash).await?;
+            }
+        }
+    }
 
     // Remove the temp file
     fs::remove_file(&tgz_file).await?;
@@ -383,7 +498,7 @@ async fn download_and_extract_tgz_with_hash_once(
 }
 
 /// Predicate for the single download → verify → extract retry in
-/// [`download_and_extract_tgz_with_hash`].
+/// [`download_and_extract_tgz`].
 ///
 /// Retries transient failures that a fresh re-download can fix; everything else
 /// fails fast:

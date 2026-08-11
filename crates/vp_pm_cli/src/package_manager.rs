@@ -15,7 +15,9 @@ use crossterm::{
     style::{Color, Print, ResetColor, SetForegroundColor},
     terminal,
 };
-use semver::{Version, VersionReq};
+use semver::Version;
+#[cfg(test)]
+use semver::VersionReq;
 use serde::{Deserialize, Serialize};
 use tokio::fs::remove_dir_all;
 use vp_error::Error;
@@ -28,7 +30,10 @@ use vt_workspace::{WorkspaceFile, WorkspaceRoot, find_workspace_root};
 
 use crate::{
     config::{get_npm_package_metadata_url, get_npm_package_tgz_url, get_npm_package_version_url},
-    request::{HttpClient, download_and_extract_tgz_with_hash, verify_file_hash},
+    request::{
+        HttpClient, download_and_extract_tgz_file_with_hash, download_and_extract_tgz_with_hash,
+        verify_file_hash,
+    },
     shim,
 };
 
@@ -104,6 +109,14 @@ impl PackageManagerType {
             (_, Self::Yarn) => "yarn",
             (_, Self::Bun) => "bun",
         }
+    }
+
+    /// Whether Corepack integrity pins for this package-manager version cover
+    /// the extracted CLI binary rather than the npm tarball.
+    #[must_use]
+    pub fn uses_cli_binary_hash(self, version: &str) -> bool {
+        matches!(self, Self::Yarn)
+            && Version::parse(version).is_ok_and(|version| version >= Version::new(2, 0, 0))
     }
 }
 
@@ -835,8 +848,7 @@ pub async fn download_package_manager(
         )
     })?;
 
-    let is_modern_yarn = matches!(package_manager_type, PackageManagerType::Yarn)
-        && VersionReq::parse(">=2.0.0")?.matches(&parsed_version);
+    let is_modern_yarn = package_manager_type.uses_cli_binary_hash(&version);
     let mut package_name: Str = package_manager_type.to_string().into();
     // handle yarn >= 2.0.0 to use `@yarnpkg/cli-dist` as package name
     // @see https://github.com/nodejs/corepack/blob/main/config.json#L135
@@ -885,16 +897,26 @@ pub async fn download_package_manager(
     let tmp_dir = tempfile::tempdir_in(parent_dir)?;
     let target_dir_tmp = tmp_dir.path().to_path_buf();
 
-    let archive_hash = if is_modern_yarn { None } else { expected_hash };
     let download_message = format!("Downloading {package_manager_type} v{version}...");
-    download_and_extract_tgz_with_hash(
-        &tgz_url,
-        &target_dir_tmp,
-        archive_hash,
-        Some(&download_message),
-    )
-    .await
-    .map_err(|err| {
+    let download_result = if is_modern_yarn {
+        download_and_extract_tgz_file_with_hash(
+            &tgz_url,
+            &target_dir_tmp,
+            "package/bin/yarn.js",
+            expected_hash,
+            Some(&download_message),
+        )
+        .await
+    } else {
+        download_and_extract_tgz_with_hash(
+            &tgz_url,
+            &target_dir_tmp,
+            expected_hash,
+            Some(&download_message),
+        )
+        .await
+    };
+    download_result.map_err(|err| {
         // status 404 means the version is not found, convert to PackageManagerVersionNotFound error
         if let Error::Reqwest(e) = &err
             && let Some(status) = e.status()
@@ -913,10 +935,6 @@ pub async fn download_package_manager(
     // Normalize the package root to $target_dir_tmp/{bin_name}. Most npm
     // tarballs use `package/`, but the directory name is not guaranteed.
     let extracted_package_dir = find_extracted_package_dir(&target_dir_tmp)?;
-
-    if is_modern_yarn {
-        verify_yarn_binary_hash(&extracted_package_dir, expected_hash).await?;
-    }
 
     tracing::debug!("Rename package dir to {}", bin_name);
     tokio::fs::rename(&extracted_package_dir, &target_dir_tmp.join(&bin_name)).await?;
@@ -1752,6 +1770,34 @@ mod tests {
         gz_data
     }
 
+    fn create_yarn_package_tgz_with_symlink(yarn_js: &[u8], link_target: &Path) -> Vec<u8> {
+        let mut tar_builder = tar::Builder::new(Vec::new());
+
+        let mut header = tar::Header::new_gnu();
+        header.set_size(yarn_js.len() as u64);
+        header.set_mode(0o755);
+        tar_builder
+            .append_data(&mut header, "package/bin/yarn.js", std::io::Cursor::new(yarn_js))
+            .unwrap();
+
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_link_name(link_target).unwrap();
+        header.set_cksum();
+        tar_builder.append_data(&mut header, "package/bin/yarn", std::io::empty()).unwrap();
+
+        let tar_data = tar_builder.into_inner().unwrap();
+        let mut gz_data = Vec::new();
+        {
+            let mut encoder =
+                flate2::write::GzEncoder::new(&mut gz_data, flate2::Compression::default());
+            std::io::copy(&mut std::io::Cursor::new(tar_data), &mut encoder).unwrap();
+        }
+        gz_data
+    }
+
     fn create_package_json(dir: &AbsolutePath, content: &str) {
         fs::write(dir.join("package.json"), content).expect("Failed to write package.json");
     }
@@ -1912,6 +1958,16 @@ mod tests {
         assert_eq!(PackageManagerType::Yarn.bin_name_for_tool("yarnpkg"), "yarnpkg");
         assert_eq!(PackageManagerType::Bun.bin_name_for_tool("bun"), "bun");
         assert_eq!(PackageManagerType::Bun.bin_name_for_tool("bunx"), "bunx");
+    }
+
+    #[test]
+    fn test_uses_cli_binary_hash_only_for_modern_yarn() {
+        assert!(!PackageManagerType::Yarn.uses_cli_binary_hash("1.22.22"));
+        assert!(!PackageManagerType::Yarn.uses_cli_binary_hash("2.0.0-rc.1"));
+        assert!(PackageManagerType::Yarn.uses_cli_binary_hash("2.0.0"));
+        assert!(PackageManagerType::Yarn.uses_cli_binary_hash("4.17.1"));
+        assert!(!PackageManagerType::Pnpm.uses_cli_binary_hash("10.0.0"));
+        assert!(!PackageManagerType::Yarn.uses_cli_binary_hash("latest"));
     }
 
     #[test]
@@ -3459,6 +3515,103 @@ mod tests {
                 .await;
         assert!(matches!(result, Err(Error::HashMismatch { .. })));
         assert_eq!(mock.hits(), 1, "cached installs should be verified without downloading");
+    }
+
+    #[tokio::test]
+    async fn test_download_modern_yarn_extracts_only_authenticated_cli() {
+        use httpmock::prelude::*;
+        use sha2::{Digest, Sha512};
+
+        let vp_home = create_temp_dir();
+        let victim_dir = create_temp_dir();
+        let victim = victim_dir.path().join("victim");
+        fs::write(&victim, "original").unwrap();
+
+        let server = MockServer::start();
+        let yarn_js = b"#!/usr/bin/env node\nconsole.log('mock yarn');\n";
+        let mock_tgz = create_yarn_package_tgz_with_symlink(yarn_js, &victim);
+        server.mock(|when, then| {
+            when.method(GET).path("/@yarnpkg/cli-dist/-/cli-dist-4.17.1.tgz");
+            then.status(200).header("content-type", "application/octet-stream").body(mock_tgz);
+        });
+        let expected_hash = format!("sha512.{}", hex::encode(Sha512::digest(yarn_js)));
+
+        let _guard = EnvConfig::test_guard(EnvConfig {
+            npm_registry: server.base_url().into(),
+            vite_plus_home: Some(vp_home.path().to_path_buf()),
+            ..EnvConfig::for_test()
+        });
+
+        let (install_dir, _, _) =
+            download_package_manager(PackageManagerType::Yarn, "4.17.1", Some(&expected_hash))
+                .await
+                .expect("the authenticated Yarn CLI should install");
+
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "original");
+        assert!(
+            fs::symlink_metadata(install_dir.join("bin/yarn")).unwrap().file_type().is_file(),
+            "the generated shim must not reuse an archive-provided symlink"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_download_modern_yarn_retries_binary_hash_mismatch() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        use sha2::{Digest, Sha512};
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+
+        let bad_tgz = create_yarn_package_tgz(b"corrupt");
+        let yarn_js = b"#!/usr/bin/env node\nconsole.log('mock yarn');\n";
+        let good_tgz = create_yarn_package_tgz(yarn_js);
+        let expected_hash = format!("sha512.{}", hex::encode(Sha512::digest(yarn_js)));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let server_attempts = Arc::clone(&attempts);
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 2048];
+                let _ = socket.read(&mut request).await;
+
+                let attempt = server_attempts.fetch_add(1, Ordering::SeqCst);
+                let body = if attempt == 0 { &bad_tgz } else { &good_tgz };
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                socket.write_all(headers.as_bytes()).await.unwrap();
+                socket.write_all(body).await.unwrap();
+                socket.flush().await.unwrap();
+            }
+        });
+
+        let vp_home = create_temp_dir();
+        let _guard = EnvConfig::test_guard(EnvConfig {
+            npm_registry: format!("http://{addr}").into(),
+            vite_plus_home: Some(vp_home.path().to_path_buf()),
+            ..EnvConfig::for_test()
+        });
+
+        let result =
+            download_package_manager(PackageManagerType::Yarn, "4.17.1", Some(&expected_hash))
+                .await;
+        server.abort();
+
+        assert!(result.is_ok(), "a fresh authenticated response should recover: {result:?}");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            2,
+            "the bad CLI response should be retried exactly once"
+        );
     }
 
     #[tokio::test]
