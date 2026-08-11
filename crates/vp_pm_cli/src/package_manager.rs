@@ -113,10 +113,17 @@ impl PackageManagerType {
 
     /// Whether Corepack integrity pins for this package-manager version cover
     /// the extracted CLI binary rather than the npm tarball.
+    ///
+    /// Corepack splits Yarn at 2.0.0 and matches that range with
+    /// `satisfiesWithPrereleases`, which drops the prerelease tag before it
+    /// compares. Every 2.x prerelease is therefore a Berry version to Corepack,
+    /// so this compares the major alone; `VersionReq(">=2.0.0")` would exclude
+    /// `4.0.0-rc.53` and send it to the Yarn Classic package, which never
+    /// published it.
     #[must_use]
     pub fn uses_cli_binary_hash(self, version: &str) -> bool {
         matches!(self, Self::Yarn)
-            && Version::parse(version).is_ok_and(|version| version >= Version::new(2, 0, 0))
+            && Version::parse(version).is_ok_and(|version| version.major >= 2)
     }
 }
 
@@ -1995,11 +2002,16 @@ mod tests {
     #[test]
     fn test_uses_cli_binary_hash_only_for_modern_yarn() {
         assert!(!PackageManagerType::Yarn.uses_cli_binary_hash("1.22.22"));
-        assert!(!PackageManagerType::Yarn.uses_cli_binary_hash("2.0.0-rc.1"));
         assert!(PackageManagerType::Yarn.uses_cli_binary_hash("2.0.0"));
         assert!(PackageManagerType::Yarn.uses_cli_binary_hash("4.17.1"));
         assert!(!PackageManagerType::Pnpm.uses_cli_binary_hash("10.0.0"));
         assert!(!PackageManagerType::Yarn.uses_cli_binary_hash("latest"));
+
+        // Corepack drops the prerelease tag before it matches its `>=2.0.0`
+        // range, so a 2.x prerelease pin is a Berry pin there too. `corepack
+        // use yarn@4.0.0-rc.53` writes a hash of `bin/yarn.js`.
+        assert!(PackageManagerType::Yarn.uses_cli_binary_hash("2.0.0-rc.1"));
+        assert!(PackageManagerType::Yarn.uses_cli_binary_hash("4.0.0-rc.53"));
     }
 
     #[test]
