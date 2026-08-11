@@ -121,6 +121,10 @@ impl PackageManagerType {
     }
 }
 
+/// Name of the file that records the pin vp verified when it installed a
+/// package manager, relative to the version directory.
+const VERIFIED_PIN_RECORD: &str = ".verified-pin";
+
 /// Path of the Yarn CLI inside `@yarnpkg/cli-dist`, relative to the package root.
 ///
 /// Corepack hashes this file to pin Yarn 2+. Three places must name the same
@@ -901,7 +905,14 @@ pub async fn download_package_manager(
     // If all shims already exist, return the target directory
     // $VP_HOME/package_manager/pnpm/10.0.0/pnpm/bin/(pnpm|pnpm.cmd|pnpm.ps1)
     if is_package_manager_install_complete(&install_dir, &bin_name)? {
-        verify_cached_cli_hash(package_manager_type, &install_dir, expected_hash, &version).await?;
+        verify_cached_cli_hash(
+            package_manager_type,
+            &target_dir,
+            &install_dir,
+            expected_hash,
+            &version,
+        )
+        .await?;
         return Ok((install_dir, package_name, version));
     }
 
@@ -965,8 +976,24 @@ pub async fn download_package_manager(
     // the install is all-or-nothing)
     if is_package_manager_install_complete(&install_dir, &bin_name)? {
         tracing::debug!("install already complete after lock acquisition, skip rename");
-        verify_cached_cli_hash(package_manager_type, &install_dir, expected_hash, &version).await?;
+        verify_cached_cli_hash(
+            package_manager_type,
+            &target_dir,
+            &install_dir,
+            expected_hash,
+            &version,
+        )
+        .await?;
         return Ok((install_dir, package_name, version));
+    }
+
+    // Record the pin this install was verified against. The record moves into
+    // place with the install, so a later command can trust the cache after one
+    // string comparison.
+    if let Some(expected_hash) = expected_hash
+        && is_modern_yarn
+    {
+        tokio::fs::write(target_dir_tmp.join(VERIFIED_PIN_RECORD), expected_hash).await?;
     }
 
     // rename $target_dir_tmp to $target_dir
@@ -985,9 +1012,10 @@ pub async fn download_package_manager(
 /// package manager when the cache cannot serve it.
 ///
 /// This function returns the cached path when the shim already exists. A pin
-/// that covers a file inside the install is the exception:
-/// [`verify_cached_cli_hash`] must read that file again before vp runs it. The
-/// rule stays here, so the shim hot path holds no package-manager specifics.
+/// that covers a file inside the install is the exception: it goes through
+/// [`verify_cached_cli_hash`], which compares the pin against the record vp
+/// wrote at install time. The rule stays here, so the shim hot path holds no
+/// package-manager specifics.
 pub async fn ensure_package_manager_bin(
     package_manager_type: PackageManagerType,
     version: &str,
@@ -1012,11 +1040,19 @@ pub async fn ensure_package_manager_bin(
 
 /// Verify a cached CLI against a pin that covers it.
 ///
-/// Corepack hashes the extracted Yarn 2+ CLI and not the npm tarball, so vp can
-/// verify that pin from the cache. Every other pin names a tarball that vp does
-/// not keep, so this function accepts it without a check.
+/// vp hashes the CLI once, when it installs the package manager, and records
+/// the pin it verified. A later command compares its own pin against that
+/// record, so it never hashes the multi-megabyte CLI again.
+///
+/// The record is missing after an install by an older vp, and it differs after
+/// the project changes its pin. Both cases hash the CLI once more.
+///
+/// Only a Corepack Yarn 2+ pin covers a file that vp keeps. Every other pin
+/// names a tarball that vp deletes after it extracts it, so this function
+/// accepts those without a check.
 async fn verify_cached_cli_hash(
     package_manager_type: PackageManagerType,
+    target_dir: &AbsolutePath,
     install_dir: &AbsolutePath,
     expected_hash: Option<&str>,
     version: &str,
@@ -1028,9 +1064,20 @@ async fn verify_cached_cli_hash(
         return Ok(());
     }
 
+    let record_path = target_dir.join(VERIFIED_PIN_RECORD);
+    if let Ok(recorded_pin) = tokio::fs::read_to_string(&record_path).await
+        && recorded_pin.trim() == expected_hash
+    {
+        tracing::debug!("cached {package_manager_type} matches the recorded pin");
+        return Ok(());
+    }
+
     verify_file_hash(install_dir.join(YARN_CLI_ENTRY), expected_hash)
         .await
-        .map_err(|error| name_hashed_artifact(error, package_manager_type, version))
+        .map_err(|error| name_hashed_artifact(error, package_manager_type, version))?;
+    // Best effort: a read-only cache still verifies, it just hashes every time.
+    let _ = tokio::fs::write(&record_path, expected_hash).await;
+    Ok(())
 }
 
 /// Name the artifact that a `packageManager` hash covers in an integrity
@@ -3583,18 +3630,68 @@ mod tests {
                 .await
                 .expect("Corepack's Yarn binary hash should be accepted");
         assert_eq!(mock.hits(), 1);
+        assert_eq!(
+            fs::read_to_string(install_dir.parent().unwrap().join(VERIFIED_PIN_RECORD)).unwrap(),
+            expected_hash,
+            "the install must record the pin it verified"
+        );
 
-        fs::write(install_dir.join("bin/yarn.js"), "corrupt").unwrap();
+        // The same pin on a warm cache reads the record instead of the CLI.
+        download_package_manager(PackageManagerType::Yarn, "4.17.1", Some(&expected_hash))
+            .await
+            .expect("a recorded pin should be accepted from the cache");
+        assert_eq!(mock.hits(), 1, "a cached install must not download again");
+
+        // A different pin does not match the record, so vp hashes the cached
+        // CLI and reports the mismatch.
+        let other_hash = format!("sha512.{}", hex::encode(Sha512::digest(b"other")));
         let result =
-            download_package_manager(PackageManagerType::Yarn, "4.17.1", Some(&expected_hash))
-                .await;
+            download_package_manager(PackageManagerType::Yarn, "4.17.1", Some(&other_hash)).await;
         let Err(error @ Error::PackageManagerHashMismatch { .. }) = result else {
-            panic!("a corrupted cached CLI must fail the integrity check: {result:?}");
+            panic!("a pin the cached CLI does not match must fail: {result:?}");
         };
         let message = error.to_string();
         assert!(message.contains("yarn@4.17.1"), "{message}");
         assert!(message.contains("bin/yarn.js"), "{message}");
-        assert_eq!(mock.hits(), 1, "cached installs should be verified without downloading");
+        assert_eq!(mock.hits(), 1, "a cached install must be checked without downloading");
+    }
+
+    #[tokio::test]
+    async fn test_download_modern_yarn_hashes_a_cache_without_a_record() {
+        use httpmock::prelude::*;
+        use sha2::{Digest, Sha512};
+
+        let vp_home = create_temp_dir();
+        let server = MockServer::start();
+        let yarn_js = b"#!/usr/bin/env node\nconsole.log('mock yarn');\n";
+        let mock_tgz = create_yarn_package_tgz(yarn_js, None);
+        server.mock(|when, then| {
+            when.method(GET).path("/@yarnpkg/cli-dist/-/cli-dist-4.17.1.tgz");
+            then.status(200).header("content-type", "application/octet-stream").body(mock_tgz);
+        });
+        let expected_hash = format!("sha512.{}", hex::encode(Sha512::digest(yarn_js)));
+
+        let _guard = EnvConfig::test_guard(EnvConfig {
+            npm_registry: server.base_url().into(),
+            vite_plus_home: Some(vp_home.path().to_path_buf()),
+            ..EnvConfig::for_test()
+        });
+
+        let (install_dir, _, _) =
+            download_package_manager(PackageManagerType::Yarn, "4.17.1", Some(&expected_hash))
+                .await
+                .expect("Corepack's Yarn binary hash should be accepted");
+
+        // An install by an older vp has no record. vp falls back to the CLI.
+        fs::remove_file(install_dir.parent().unwrap().join(VERIFIED_PIN_RECORD)).unwrap();
+        fs::write(install_dir.join("bin/yarn.js"), "corrupt").unwrap();
+        let result =
+            download_package_manager(PackageManagerType::Yarn, "4.17.1", Some(&expected_hash))
+                .await;
+        assert!(
+            matches!(result, Err(Error::PackageManagerHashMismatch { .. })),
+            "a cache without a record must be hashed: {result:?}"
+        );
     }
 
     #[tokio::test]
