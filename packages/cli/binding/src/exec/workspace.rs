@@ -108,13 +108,11 @@ pub(super) async fn execute_exec_workspace(
     // Build base PATH: <pm_bin>:<workspace_root/node_modules/.bin>:<original_PATH>
     let base_path_dirs: Vec<std::path::PathBuf> = {
         let mut dirs = Vec::new();
-        // Include package manager bin dir. An integrity failure stops the run:
-        // see `is_package_manager_integrity_failure`.
+        // Include package manager bin dir. An unverified package manager stops
+        // the run instead of dropping out of PATH.
         match vp_pm_cli::PackageManager::builder(&*workspace_root.path).build().await {
             Ok(pm) => dirs.push(pm.get_bin_prefix().as_path().to_path_buf()),
-            Err(error) if crate::cli::is_package_manager_integrity_failure(&error) => {
-                return Err(error);
-            }
+            Err(error) if error.is_integrity_failure() => return Err(error),
             Err(error) => {
                 tracing::debug!(?error, "failed to resolve package manager for exec PATH setup");
             }

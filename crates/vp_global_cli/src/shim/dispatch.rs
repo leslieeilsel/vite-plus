@@ -6,8 +6,7 @@
 //! 3. Tool execution (core tools and package binaries)
 
 use vp_pm_cli::{
-    PackageManagerType, download_package_manager, package_manager_bin_path,
-    package_manager_install_dir, resolve_package_manager_from_package_json,
+    PackageManagerType, ensure_package_manager_bin, resolve_package_manager_from_package_json,
 };
 use vp_shared::{PrependOptions, env_vars, output, prepend_to_path_env};
 use vt_path::{AbsolutePath, AbsolutePathBuf, current_dir};
@@ -686,29 +685,14 @@ async fn resolve_matching_package_manager_tool(
     }
 
     let bin_name = expected_type.bin_name_for_tool(tool);
-
-    // Keep the hot path for unpinned installs and archive-hashed package
-    // managers. A Corepack-style Yarn pin covers the extracted CLI, so it must
-    // pass through download_package_manager even when the shim already exists;
-    // that path re-verifies the cached yarn.js before it can be executed.
-    let must_verify_cached_cli =
-        resolution.hash.is_some() && expected_type.uses_cli_binary_hash(&resolution.version);
-    if !must_verify_cached_cli {
-        if let Some(install_dir) = package_manager_install_dir(expected_type, &resolution.version) {
-            let bin_path = package_manager_bin_path(&install_dir, bin_name);
-            if bin_path.as_path().exists() {
-                return Ok(Some(bin_path));
-            }
-        }
-    }
-
-    let (install_dir, _, _) = download_package_manager(
-        resolution.package_manager_type,
+    let bin_path = ensure_package_manager_bin(
+        expected_type,
         &resolution.version,
         resolution.hash.as_deref(),
+        bin_name,
     )
     .await?;
-    Ok(Some(package_manager_bin_path(&install_dir, bin_name)))
+    Ok(Some(bin_path))
 }
 
 async fn prepend_js_child_process_path_env(

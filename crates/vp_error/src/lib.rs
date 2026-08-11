@@ -139,6 +139,19 @@ pub enum Error {
     Anyhow(#[from] anyhow::Error),
 }
 
+impl Error {
+    /// Whether this error means a downloaded or cached artifact failed its
+    /// integrity check.
+    ///
+    /// Callers that otherwise fall back when a managed tool is unavailable use
+    /// this to stop instead: an unverified artifact is the user's to fix, and
+    /// falling back hides it behind a later, unrelated failure.
+    #[must_use]
+    pub const fn is_integrity_failure(&self) -> bool {
+        matches!(self, Self::PackageManagerHashMismatch(_) | Self::HashMismatch { .. })
+    }
+}
+
 /// Details of a failed `packageManager` integrity check.
 ///
 /// `basis` names the hashed artifact. Corepack pins Yarn 2+ from the extracted

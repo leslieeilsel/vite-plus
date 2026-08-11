@@ -217,7 +217,11 @@ async fn envs_with_explicit_package_manager_path(
     .await
     {
         Ok(result) => result,
-        Err(error) if is_package_manager_integrity_failure(&error) => return Err(error),
+        // Every other reason to miss the managed package manager (no network,
+        // an unknown version) leaves the command usable through PATH, so it
+        // stays a debug log. Swallowing an integrity failure would turn a wrong
+        // `packageManager` hash into "command not found" further down.
+        Err(error) if error.is_integrity_failure() => return Err(error),
         Err(error) => {
             tracing::debug!(
                 ?error,
@@ -228,16 +232,6 @@ async fn envs_with_explicit_package_manager_path(
     };
 
     Ok(prepend_to_env_path(&envs, &install_dir.join("bin")))
-}
-
-/// Whether an error means the pinned package manager failed its integrity check.
-///
-/// Every other reason to miss the managed package manager (no network, an
-/// unknown version) leaves the command usable through PATH, so it stays a debug
-/// log. An integrity failure does not: dropping it here turns a wrong
-/// `packageManager` hash into "command not found" further down.
-pub(crate) fn is_package_manager_integrity_failure(error: &Error) -> bool {
-    matches!(error, Error::PackageManagerHashMismatch(_) | Error::HashMismatch { .. })
 }
 
 /// Execute a vite-task command (run, cache) through Session.
@@ -273,7 +267,7 @@ async fn execute_vite_task_command(
             let bin_prefix = pm.get_bin_prefix();
             let _ = prepend_to_path_env(&bin_prefix, PrependOptions::default());
         }
-        Err(error) if is_package_manager_integrity_failure(&error) => return Err(error),
+        Err(error) if error.is_integrity_failure() => return Err(error),
         Err(error) => {
             tracing::debug!(?error, "failed to resolve package manager for task PATH setup");
         }
