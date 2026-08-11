@@ -7,7 +7,7 @@ Ensure the Corepack-pinned Yarn version is not cached
 
 ## `vpt stat-file $VP_HOME/package_manager/yarn/4.17.1 --assert missing`
 
-Yarn 4.17.1 starts uncached
+Yarn 4.17.1 is not in the cache
 
 ```
 <home>/.vite-plus/package_manager/yarn/<version>: missing
@@ -15,7 +15,7 @@ Yarn 4.17.1 starts uncached
 
 ## `vp run smoke`
 
-A cold vp run accepts the hash and executes the task
+A first vp run accepts the hash and runs the task
 
 ```
 VITE+ - The Unified Toolchain for the Web
@@ -26,7 +26,7 @@ yarn hash accepted
 
 ## `vpt stat-file $VP_HOME/package_manager/yarn/4.17.1/yarn/bin/yarn.js --assert file`
 
-vp run finalized the verified Yarn cache
+vp run wrote the verified Yarn CLI to the cache
 
 ```
 <home>/.vite-plus/package_manager/yarn/<version>/yarn/bin/yarn.js: file
@@ -34,7 +34,7 @@ vp run finalized the verified Yarn cache
 
 ## `vp run smoke`
 
-A warm vp run reuses the cached Yarn binary
+A second vp run uses the cached Yarn CLI
 
 ```
 VITE+ - The Unified Toolchain for the Web

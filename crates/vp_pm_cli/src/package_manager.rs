@@ -106,14 +106,15 @@ impl PackageManagerType {
         }
     }
 
-    /// Whether Corepack integrity pins for this package-manager version cover
-    /// the extracted CLI binary rather than the npm tarball.
+    /// Whether a Corepack pin for this version covers the extracted CLI binary
+    /// and not the npm tarball.
     #[must_use]
     pub fn uses_cli_binary_hash(self, version: &str) -> bool {
         Version::parse(version).is_ok_and(|version| self.hashes_cli_binary_of(&version))
     }
 
-    /// [`Self::uses_cli_binary_hash`] for a version the caller already parsed.
+    /// The same test as [`Self::uses_cli_binary_hash`], for a version that the
+    /// caller already parsed.
     #[must_use]
     pub fn hashes_cli_binary_of(self, version: &Version) -> bool {
         matches!(self, Self::Yarn) && is_yarn_berry(version)
@@ -122,17 +123,17 @@ impl PackageManagerType {
 
 /// Path of the Yarn CLI inside `@yarnpkg/cli-dist`, relative to the package root.
 ///
-/// Corepack pins Yarn 2+ by hashing this file, so the download, the cached-CLI
-/// check, and the error message must all name the same path.
+/// Corepack hashes this file to pin Yarn 2+. Three places must name the same
+/// path: the download, the cached-CLI check, and the error message.
 const YARN_CLI_ENTRY: &str = "bin/yarn.js";
 
 /// Whether a Yarn version is Berry (Yarn 2 and later).
 ///
-/// Corepack splits Yarn at 2.0.0 and matches that range with
-/// `satisfiesWithPrereleases`, which drops the prerelease tag before it
-/// compares. Every 2.x prerelease is Berry there, so this compares the major
-/// alone; `VersionReq(">=2.0.0")` would exclude `4.0.0-rc.53` and send it to
-/// the Yarn Classic package, which never published it.
+/// Corepack splits Yarn at 2.0.0. It matches that range with
+/// `satisfiesWithPrereleases`, which drops the prerelease tag first. Every 2.x
+/// prerelease is therefore a Berry version, so this function compares the major
+/// number alone. `VersionReq(">=2.0.0")` excludes `4.0.0-rc.53` and sends it to
+/// the Yarn Classic package, which never published that version.
 pub(crate) fn is_yarn_berry(version: &Version) -> bool {
     version.major >= 2
 }
@@ -913,8 +914,8 @@ pub async fn download_package_manager(
     let target_dir_tmp = tmp_dir.path().to_path_buf();
 
     let download_message = format!("Downloading {package_manager_type} v{version}...");
-    // A Corepack Yarn 2+ pin only covers the CLI, so the rest of that archive
-    // stays unauthenticated and is never written to disk.
+    // A Corepack Yarn 2+ pin covers only the CLI. The rest of the archive stays
+    // unauthenticated, so vp never writes it to disk.
     let archive_file = is_modern_yarn.then(|| PathBuf::from(format!("package/{YARN_CLI_ENTRY}")));
     download_and_extract_tgz_with_hash(
         &tgz_url,
@@ -980,13 +981,13 @@ pub async fn download_package_manager(
     Ok((install_dir, package_name, version))
 }
 
-/// Resolve the executable path of a managed package manager, installing it when
-/// the cache cannot serve it.
+/// Resolve the executable path of a managed package manager. Install that
+/// package manager when the cache cannot serve it.
 ///
-/// Takes the fast path when the shim already exists, except for a pin that
-/// covers a file inside the install: [`verify_cached_cli_hash`] has to re-read
-/// that file before anything executes it. Keeping that rule here is what lets
-/// the shim hot path stay free of package-manager specifics.
+/// This function returns the cached path when the shim already exists. A pin
+/// that covers a file inside the install is the exception:
+/// [`verify_cached_cli_hash`] must read that file again before vp runs it. The
+/// rule stays here, so the shim hot path holds no package-manager specifics.
 pub async fn ensure_package_manager_bin(
     package_manager_type: PackageManagerType,
     version: &str,
@@ -1009,11 +1010,11 @@ pub async fn ensure_package_manager_bin(
     Ok(package_manager_bin_path(&install_dir, bin_name))
 }
 
-/// Re-check a cached CLI against a pin that covers it.
+/// Verify a cached CLI against a pin that covers it.
 ///
-/// Corepack hashes the extracted Yarn 2+ CLI instead of the npm tarball, so
-/// that pin can be checked without downloading anything. Every other pin names
-/// a tarball vp no longer keeps, and passes here unchecked.
+/// Corepack hashes the extracted Yarn 2+ CLI and not the npm tarball, so vp can
+/// verify that pin from the cache. Every other pin names a tarball that vp does
+/// not keep, so this function accepts it without a check.
 async fn verify_cached_cli_hash(
     package_manager_type: PackageManagerType,
     install_dir: &AbsolutePath,
@@ -1032,10 +1033,11 @@ async fn verify_cached_cli_hash(
         .map_err(|error| name_hashed_artifact(error, package_manager_type, version))
 }
 
-/// Name the artifact a `packageManager` hash covers in an integrity failure.
+/// Name the artifact that a `packageManager` hash covers in an integrity
+/// failure.
 ///
-/// `Error::HashMismatch` alone reads like a corrupt download, which sent the
-/// reporter of #2209 looking for a network problem instead of a hash basis.
+/// `Error::HashMismatch` alone reads like a corrupt download. The reporter of
+/// #2209 looked for a network problem, not for a different hash basis.
 fn name_hashed_artifact(
     error: Error,
     package_manager_type: PackageManagerType,
@@ -1831,8 +1833,8 @@ mod tests {
 
     /// Build an `@yarnpkg/cli-dist` style tarball around `yarn_js`.
     ///
-    /// `symlink_target` adds a `package/bin/yarn` symlink, the archive-controlled
-    /// entry an unauthenticated tarball could use to write outside the install.
+    /// `symlink_target` adds a `package/bin/yarn` symlink. An unauthenticated
+    /// tarball can use that entry to write outside the install directory.
     fn create_yarn_package_tgz(yarn_js: &[u8], symlink_target: Option<&Path>) -> Vec<u8> {
         let mut tar_builder = tar::Builder::new(Vec::new());
         let mut header = tar::Header::new_gnu();
@@ -2033,8 +2035,8 @@ mod tests {
         assert!(!PackageManagerType::Yarn.uses_cli_binary_hash("latest"));
 
         // Corepack drops the prerelease tag before it matches its `>=2.0.0`
-        // range, so a 2.x prerelease pin is a Berry pin there too. `corepack
-        // use yarn@4.0.0-rc.53` writes a hash of `bin/yarn.js`.
+        // range. A 2.x prerelease pin is therefore a Berry pin there too.
+        // `corepack use yarn@4.0.0-rc.53` writes a hash of `bin/yarn.js`.
         assert!(PackageManagerType::Yarn.uses_cli_binary_hash("2.0.0-rc.1"));
         assert!(PackageManagerType::Yarn.uses_cli_binary_hash("4.0.0-rc.53"));
     }
@@ -3249,7 +3251,7 @@ mod tests {
                     mismatch.actual,
                     "sha512.ca75da26c00327d26267ce33536e5790f18ebd53266796fbb664d2a4a5116308042dd8ee7003b276a20eace7d3c5561c3577bdd71bcb67071187af124779620a"
                 );
-                // Yarn Classic ships the CLI inside the tarball Corepack pins.
+                // Yarn Classic ships the CLI inside the tarball that Corepack pins.
                 assert_eq!(mismatch.basis, "the npm package tarball");
             }
             other => panic!("Expected PackageManagerHashMismatch error, got {other:?}"),

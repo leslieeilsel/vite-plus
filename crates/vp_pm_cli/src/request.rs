@@ -299,8 +299,8 @@ fn extract_tgz(tgz_file: impl AsRef<Path>, target_dir: impl AsRef<Path>) -> Resu
 
 /// Extract exactly one regular file from a tgz archive.
 ///
-/// Unlike [`extract_tgz`], archive-controlled paths and links are never written.
-/// This is used when an integrity pin covers one file inside an otherwise
+/// Unlike [`extract_tgz`], this function never writes an archive-controlled
+/// path or link. Use it when an integrity pin covers one file inside an
 /// unauthenticated archive.
 fn extract_tgz_file(
     tgz_file: impl AsRef<Path>,
@@ -351,9 +351,9 @@ fn extract_tgz_file(
 /// # Arguments
 /// * `url` - The URL of the tgz file to download.
 /// * `target_dir` - The directory to extract the tgz file to.
-/// * `archive_file` - Optional single entry to extract, given as a relative path
-///   of normal components. Every other entry is then ignored and never written,
-///   and `expected_hash` covers that one file instead of the tgz.
+/// * `archive_file` - Optional single entry to extract, as a relative path of
+///   normal components. vp ignores every other entry, and `expected_hash`
+///   covers that one file instead of the tgz.
 /// * `expected_hash` - Optional expected hash, "algorithm.hex" or SRI "algorithm-base64" (see [`verify_file_hash`])
 /// * `message` - Optional message shown above a progress bar while downloading (see [`HttpClient::download_file`])
 ///
@@ -427,8 +427,8 @@ async fn download_and_extract_tgz_once(
     client.download_file(url, &tgz_file, message).await?;
 
     if let Some(archive_file) = archive_file {
-        // The hash covers one entry, so the archive around it is unauthenticated
-        // and only that entry may be written.
+        // The hash covers one entry. The rest of the archive is unauthenticated,
+        // so vp writes only that entry.
         let target_file = target_dir.join(archive_file);
         let tgz_file_for_extract = tgz_file.clone();
         let archive_file_for_extract = archive_file.to_path_buf();
@@ -485,11 +485,11 @@ fn is_retryable_download_error(err: &Error) -> bool {
     }
 }
 
-/// Computes the digest of a file, reading it in chunks.
+/// Compute the digest of a file in chunks.
 ///
-/// Streaming keeps peak memory flat where slurping would allocate the whole
-/// artifact: `bin/yarn.js` is ~3 MB and is re-hashed on every command that
-/// resolves a hash-pinned Yarn.
+/// A chunked read keeps peak memory flat, because it never holds the whole
+/// artifact. `bin/yarn.js` is about 3 MB, and vp hashes it on every command
+/// that resolves a hash-pinned Yarn.
 fn digest_file<D: Digest>(file_path: &Path) -> Result<Vec<u8>, std::io::Error> {
     let mut file = std::fs::File::open(file_path)?;
     let mut hasher = D::new();
@@ -534,8 +534,8 @@ pub(crate) async fn verify_file_hash(
         return Err(Error::InvalidHashFormat(expected_hash.into()));
     };
 
-    // Read and hash on the blocking pool: hashing multi-megabyte artifacts is
-    // CPU-bound and would otherwise stall a runtime worker thread.
+    // Read and hash on the blocking pool. A hash of a multi-megabyte artifact
+    // is CPU-bound and stalls a runtime worker thread.
     let algorithm_for_digest = algorithm.to_owned();
     let digest = tokio::task::spawn_blocking(move || match algorithm_for_digest.as_str() {
         "sha512" => digest_file::<Sha512>(&file_path).map(Some),

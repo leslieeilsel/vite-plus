@@ -217,10 +217,10 @@ async fn envs_with_explicit_package_manager_path(
     .await
     {
         Ok(result) => result,
-        // Every other reason to miss the managed package manager (no network,
-        // an unknown version) leaves the command usable through PATH, so it
-        // stays a debug log. Swallowing an integrity failure would turn a wrong
-        // `packageManager` hash into "command not found" further down.
+        // A missing package manager has other causes, such as no network or an
+        // unknown version. The command still runs from PATH, so those causes
+        // stay a debug log. An integrity failure is different. If vp hides it,
+        // the user sees only "command not found" further down.
         Err(error) if error.is_integrity_failure() => return Err(error),
         Err(error) => {
             tracing::debug!(

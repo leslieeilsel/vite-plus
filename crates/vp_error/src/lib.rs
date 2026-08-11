@@ -112,10 +112,10 @@ pub enum Error {
     #[error("Hash mismatch: expected {expected}, got {actual}")]
     HashMismatch { expected: Str, actual: Str },
 
-    /// A `packageManager` integrity pin did not match the artifact it covers.
+    /// A `packageManager` integrity pin does not match the artifact it covers.
     ///
-    /// Boxed so this one rare variant does not widen every `Result<_, Error>`
-    /// in the CLI (`clippy::result_large_err`).
+    /// This variant boxes its payload. Without the box, it makes every
+    /// `Result<_, Error>` in the CLI larger (`clippy::result_large_err`).
     #[error(transparent)]
     PackageManagerHashMismatch(#[from] Box<PackageManagerHashMismatch>),
 
@@ -140,12 +140,11 @@ pub enum Error {
 }
 
 impl Error {
-    /// Whether this error means a downloaded or cached artifact failed its
-    /// integrity check.
+    /// Whether the error says that an artifact failed its integrity check.
     ///
-    /// Callers that otherwise fall back when a managed tool is unavailable use
-    /// this to stop instead: an unverified artifact is the user's to fix, and
-    /// falling back hides it behind a later, unrelated failure.
+    /// Some callers continue when a managed tool is missing. They must stop for
+    /// this error. The user must fix an unverified artifact, and a fallback
+    /// hides the cause behind a later, unrelated failure.
     #[must_use]
     pub const fn is_integrity_failure(&self) -> bool {
         matches!(self, Self::PackageManagerHashMismatch(_) | Self::HashMismatch { .. })
@@ -154,13 +153,13 @@ impl Error {
 
 /// Details of a failed `packageManager` integrity check.
 ///
-/// `basis` names the hashed artifact. Corepack pins Yarn 2+ from the extracted
-/// CLI and every other package manager from the npm tarball, so a bare "hash
-/// mismatch" reads like a corrupt download.
+/// `basis` names the artifact that vp hashed. Corepack hashes the extracted CLI
+/// for Yarn 2+, and the npm tarball for every other package manager. A message
+/// that says only "hash mismatch" reads like a corrupt download.
 #[derive(Error, Debug)]
 #[error(
     "Hash mismatch for {name}@{version}: expected {expected}, got {actual}\n\
-     The `packageManager` hash covers {basis}, the artifact Corepack pins."
+     The `packageManager` hash covers {basis}. Corepack hashes the same artifact."
 )]
 pub struct PackageManagerHashMismatch {
     pub name: Str,
