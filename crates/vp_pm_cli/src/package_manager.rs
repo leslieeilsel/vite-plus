@@ -987,21 +987,13 @@ pub async fn download_package_manager(
         return Ok((install_dir, package_name, version));
     }
 
-    // Record the pin this install was verified against, with the state of the
-    // file it covers. The record moves into place with the install, so a later
-    // command can trust the cache after one `stat`.
+    // Record the pin this install was verified against. The record moves into
+    // place with the install, so a later command can trust the cache after one
+    // string comparison.
     if let Some(expected_hash) = expected_hash
         && is_modern_yarn
     {
-        let extracted_cli = target_dir_tmp.join(&bin_name).join(YARN_CLI_ENTRY);
-        let (size, modified_ms) = read_file_state(&extracted_cli).await?;
-        write_verified_pin(
-            target_dir_tmp.join(VERIFIED_PIN_RECORD),
-            expected_hash,
-            size,
-            modified_ms,
-        )
-        .await;
+        tokio::fs::write(target_dir_tmp.join(VERIFIED_PIN_RECORD), expected_hash).await?;
     }
 
     // rename $target_dir_tmp to $target_dir
@@ -1046,52 +1038,19 @@ pub async fn ensure_package_manager_bin(
     Ok(package_manager_bin_path(&install_dir, bin_name))
 }
 
-/// What vp verified when it installed a package manager.
-///
-/// The record holds the pin and the state of the file that the pin covers, so
-/// a later command can tell an untouched cache from a changed one.
-#[derive(Serialize, Deserialize)]
-struct VerifiedPin {
-    pin: Str,
-    size: u64,
-    modified_ms: u64,
-}
-
-/// Read the size and the modification time of a file, in milliseconds.
-async fn read_file_state(path: impl AsRef<Path>) -> Result<(u64, u64), Error> {
-    let metadata = tokio::fs::metadata(path.as_ref()).await?;
-    let modified_ms = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
-        .unwrap_or(0);
-    Ok((metadata.len(), modified_ms))
-}
-
-/// Record the pin that vp verified, next to the install.
-async fn write_verified_pin(record_path: impl AsRef<Path>, pin: &str, size: u64, modified_ms: u64) {
-    let record = VerifiedPin { pin: pin.into(), size, modified_ms };
-    match serde_json::to_vec(&record) {
-        // Best effort: a read-only cache still verifies. It hashes every time.
-        Ok(json) => {
-            let _ = tokio::fs::write(record_path.as_ref(), json).await;
-        }
-        Err(error) => tracing::debug!(?error, "failed to serialize the verified pin"),
-    }
-}
-
 /// Verify a cached CLI against a pin that covers it.
 ///
-/// vp hashes the CLI when it installs the package manager, and records the pin
-/// with the size and the modification time of the file it hashed. A later
-/// command reads that record and one `stat`, and hashes the multi-megabyte CLI
-/// again only when they disagree.
+/// vp hashes the CLI once, when it installs the package manager, and records
+/// the pin it verified. A later command compares its own pin against that
+/// record, so it never hashes the multi-megabyte CLI again.
 ///
-/// Three cases hash the CLI again: the project changed its pin, an older vp
-/// wrote no record, or the file on disk no longer matches the record. A
-/// replacement that keeps the same size and modification time defeats the
-/// `stat`, which is the same guarantee Corepack gives its own cache.
+/// The record is missing after an install by an older vp, and it differs after
+/// the project changes its pin. Both cases hash the CLI once more.
+///
+/// vp does not detect a CLI that changed on disk after the install, which is
+/// the guarantee Corepack gives its own cache. The record sits beside the file
+/// it describes, so a writer that can replace one can replace the other. The
+/// trust boundary is write access to `$VP_HOME`.
 ///
 /// Only a Corepack Yarn 2+ pin covers a file that vp keeps. Every other pin
 /// names a tarball that vp deletes after it extracts it, so this function
@@ -1110,23 +1069,19 @@ async fn verify_cached_cli_hash(
         return Ok(());
     }
 
-    let cli_path = install_dir.join(YARN_CLI_ENTRY);
     let record_path = target_dir.join(VERIFIED_PIN_RECORD);
-    let (size, modified_ms) = read_file_state(&cli_path).await?;
-    if let Ok(raw_record) = tokio::fs::read_to_string(&record_path).await
-        && let Ok(record) = serde_json::from_str::<VerifiedPin>(&raw_record)
-        && record.pin == expected_hash
-        && record.size == size
-        && record.modified_ms == modified_ms
+    if let Ok(recorded_pin) = tokio::fs::read_to_string(&record_path).await
+        && recorded_pin.trim() == expected_hash
     {
-        tracing::debug!("cached {package_manager_type} still matches the recorded pin");
+        tracing::debug!("cached {package_manager_type} matches the recorded pin");
         return Ok(());
     }
 
-    verify_file_hash(&cli_path, expected_hash)
+    verify_file_hash(install_dir.join(YARN_CLI_ENTRY), expected_hash)
         .await
         .map_err(|error| name_hashed_artifact(error, package_manager_type, version))?;
-    write_verified_pin(&record_path, expected_hash, size, modified_ms).await;
+    // Best effort: a read-only cache still verifies, it just hashes every time.
+    let _ = tokio::fs::write(&record_path, expected_hash).await;
     Ok(())
 }
 
@@ -3680,11 +3635,11 @@ mod tests {
                 .await
                 .expect("Corepack's Yarn binary hash should be accepted");
         assert_eq!(mock.hits(), 1);
-        let record_path = install_dir.parent().unwrap().join(VERIFIED_PIN_RECORD);
-        let record: VerifiedPin =
-            serde_json::from_str(&fs::read_to_string(&record_path).unwrap()).unwrap();
-        assert_eq!(record.pin, expected_hash.as_str(), "the install must record the pin");
-        assert_eq!(record.size, u64::try_from(yarn_js.len()).unwrap());
+        assert_eq!(
+            fs::read_to_string(install_dir.parent().unwrap().join(VERIFIED_PIN_RECORD)).unwrap(),
+            expected_hash,
+            "the install must record the pin it verified"
+        );
 
         // The same pin on a warm cache reads the record instead of the CLI.
         download_package_manager(PackageManagerType::Yarn, "4.17.1", Some(&expected_hash))
@@ -3733,9 +3688,7 @@ mod tests {
                 .expect("Corepack's Yarn binary hash should be accepted");
 
         // An install by an older vp has no record. vp falls back to the CLI.
-        let record_path = install_dir.parent().unwrap().join(VERIFIED_PIN_RECORD);
-        let record = fs::read(&record_path).unwrap();
-        fs::remove_file(&record_path).unwrap();
+        fs::remove_file(install_dir.parent().unwrap().join(VERIFIED_PIN_RECORD)).unwrap();
         fs::write(install_dir.join("bin/yarn.js"), "corrupt").unwrap();
         let result =
             download_package_manager(PackageManagerType::Yarn, "4.17.1", Some(&expected_hash))
@@ -3743,17 +3696,6 @@ mod tests {
         assert!(
             matches!(result, Err(Error::PackageManagerHashMismatch { .. })),
             "a cache without a record must be hashed: {result:?}"
-        );
-
-        // The record from the install no longer describes the file on disk, so
-        // vp hashes it again rather than trusting the record.
-        fs::write(&record_path, record).unwrap();
-        let result =
-            download_package_manager(PackageManagerType::Yarn, "4.17.1", Some(&expected_hash))
-                .await;
-        assert!(
-            matches!(result, Err(Error::PackageManagerHashMismatch { .. })),
-            "a replaced CLI must not pass on its stale record: {result:?}"
         );
     }
 
