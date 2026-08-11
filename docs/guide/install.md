@@ -39,6 +39,8 @@ A range resolves to an already-downloaded satisfying version when possible, othe
 
 Vite+ currently downloads the declared package manager (the `onFail: "download"` behavior); the other `onFail` values are accepted but not yet differentiated.
 
+A `packageManager` pin can carry an integrity hash (`yarn@4.17.1+sha512.…`), which `corepack use` writes. Vite+ verifies the artifact Corepack hashes: the extracted CLI binary (`bin/yarn.js`) for Yarn 2 and later, and the npm tarball for npm, pnpm, and Yarn Classic. A Yarn 2+ pin is re-checked against the cached CLI on every command, so a modified cache fails the check instead of running.
+
 The explicit `packageManager` field (or the `devEngines.packageManager` declaration) also affects matching package-manager shims. If a project has `packageManager: "npm@10.9.4"`, `npm` and `npx` use npm 10.9.4. Other generated alias pairs behave the same way: `pnpm`/`pnpx`, `yarn`/`yarnpkg`, and `bun`/`bunx`. Mismatched tools are not translated; `npm` in a `pnpm` project still resolves as npm.
 
 ## Usage

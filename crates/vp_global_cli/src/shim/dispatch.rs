@@ -1529,7 +1529,10 @@ mod tests {
 
         let result = resolve_matching_package_manager_tool(&cwd, "yarn").await;
         assert!(
-            matches!(result, Err(Error::Install(vp_error::Error::HashMismatch { .. }))),
+            matches!(
+                result,
+                Err(Error::Install(vp_error::Error::PackageManagerHashMismatch { .. }))
+            ),
             "the global Yarn shim must reject a corrupted pinned cache: {result:?}"
         );
     }

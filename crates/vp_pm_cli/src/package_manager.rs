@@ -872,7 +872,9 @@ pub async fn download_package_manager(
     // A declared hash names the main tarball and is verified against it; the
     // platform tarball is verified against the registry's `dist.integrity`.
     if matches!(package_manager_type, PackageManagerType::Pnpm) && parsed_version.major >= 12 {
-        return download_pnpm_native_package_manager(&version, &home_dir, expected_hash).await;
+        return download_pnpm_native_package_manager(&version, &home_dir, expected_hash)
+            .await
+            .map_err(|error| name_hashed_artifact(error, package_manager_type, &version, false));
     }
 
     let tgz_url = get_npm_package_tgz_url(&package_name, &version);
@@ -884,7 +886,7 @@ pub async fn download_package_manager(
     // $VP_HOME/package_manager/pnpm/10.0.0/pnpm/bin/(pnpm|pnpm.cmd|pnpm.ps1)
     if is_package_manager_install_complete(&install_dir, &bin_name)? {
         if is_modern_yarn {
-            verify_yarn_binary_hash(&install_dir, expected_hash).await?;
+            verify_yarn_binary_hash(&install_dir, expected_hash, &version).await?;
         }
         return Ok((install_dir, package_name, version));
     }
@@ -928,7 +930,7 @@ pub async fn download_package_manager(
                 url: tgz_url.into(),
             }
         } else {
-            err
+            name_hashed_artifact(err, package_manager_type, &version, is_modern_yarn)
         }
     })?;
 
@@ -957,7 +959,7 @@ pub async fn download_package_manager(
     if is_package_manager_install_complete(&install_dir, &bin_name)? {
         tracing::debug!("install already complete after lock acquisition, skip rename");
         if is_modern_yarn {
-            verify_yarn_binary_hash(&install_dir, expected_hash).await?;
+            verify_yarn_binary_hash(&install_dir, expected_hash, &version).await?;
         }
         return Ok((install_dir, package_name, version));
     }
@@ -978,11 +980,41 @@ pub async fn download_package_manager(
 async fn verify_yarn_binary_hash(
     package_dir: impl AsRef<Path>,
     expected_hash: Option<&str>,
+    version: &str,
 ) -> Result<(), Error> {
     if let Some(expected_hash) = expected_hash {
-        verify_file_hash(package_dir.as_ref().join("bin/yarn.js"), expected_hash).await?;
+        verify_file_hash(package_dir.as_ref().join("bin/yarn.js"), expected_hash).await.map_err(
+            |error| name_hashed_artifact(error, PackageManagerType::Yarn, version, true),
+        )?;
     }
     Ok(())
+}
+
+/// Name the artifact a `packageManager` hash covers in an integrity failure.
+///
+/// `Error::HashMismatch` alone reads like a corrupt download, which sent the
+/// reporter of #2209 looking for a network problem instead of a hash basis.
+fn name_hashed_artifact(
+    error: Error,
+    package_manager_type: PackageManagerType,
+    version: &str,
+    is_modern_yarn: bool,
+) -> Error {
+    let Error::HashMismatch { expected, actual } = error else {
+        return error;
+    };
+    Error::PackageManagerHashMismatch(Box::new(vp_error::PackageManagerHashMismatch {
+        name: package_manager_type.to_string().into(),
+        version: version.into(),
+        expected,
+        actual,
+        basis: if is_modern_yarn {
+            "the extracted Yarn CLI (bin/yarn.js)"
+        } else {
+            "the npm package tarball"
+        }
+        .into(),
+    }))
 }
 
 /// Open a lock file without truncating it. This is required on Windows
@@ -3169,7 +3201,11 @@ mod tests {
         let result = PackageManager::builder(temp_dir_path).build().await;
         assert!(result.is_err());
         // Check if it's the expected error type
-        if let Err(Error::HashMismatch { expected, actual }) = result {
+        if let Err(Error::PackageManagerHashMismatch(mismatch)) = result {
+            let vp_error::PackageManagerHashMismatch { name, version, expected, actual, basis } =
+                *mismatch;
+            assert_eq!(name, "yarn");
+            assert_eq!(version, "1.22.21");
             assert_eq!(
                 expected,
                 "sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
@@ -3178,8 +3214,10 @@ mod tests {
                 actual,
                 "sha512.ca75da26c00327d26267ce33536e5790f18ebd53266796fbb664d2a4a5116308042dd8ee7003b276a20eace7d3c5561c3577bdd71bcb67071187af124779620a"
             );
+            // Yarn Classic ships the CLI in the tarball corepack pins.
+            assert_eq!(basis, "the npm package tarball");
         } else {
-            panic!("Expected HashMismatch error");
+            panic!("Expected PackageManagerHashMismatch error");
         }
     }
 
@@ -3513,7 +3551,12 @@ mod tests {
         let result =
             download_package_manager(PackageManagerType::Yarn, "4.17.1", Some(&expected_hash))
                 .await;
-        assert!(matches!(result, Err(Error::HashMismatch { .. })));
+        let Err(error @ Error::PackageManagerHashMismatch { .. }) = result else {
+            panic!("a corrupted cached CLI must fail the integrity check: {result:?}");
+        };
+        let message = error.to_string();
+        assert!(message.contains("yarn@4.17.1"), "{message}");
+        assert!(message.contains("bin/yarn.js"), "{message}");
         assert_eq!(mock.hits(), 1, "cached installs should be verified without downloading");
     }
 

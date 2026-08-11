@@ -112,6 +112,13 @@ pub enum Error {
     #[error("Hash mismatch: expected {expected}, got {actual}")]
     HashMismatch { expected: Str, actual: Str },
 
+    /// A `packageManager` integrity pin did not match the artifact it covers.
+    ///
+    /// Boxed so this one rare variant does not widen every `Result<_, Error>`
+    /// in the CLI (`clippy::result_large_err`).
+    #[error(transparent)]
+    PackageManagerHashMismatch(#[from] Box<PackageManagerHashMismatch>),
+
     #[error("Invalid hash format: {0}")]
     InvalidHashFormat(Str),
 
@@ -130,4 +137,22 @@ pub enum Error {
 
     #[error(transparent)]
     Anyhow(#[from] anyhow::Error),
+}
+
+/// Details of a failed `packageManager` integrity check.
+///
+/// `basis` names the hashed artifact. Corepack pins Yarn 2+ from the extracted
+/// CLI and every other package manager from the npm tarball, so a bare "hash
+/// mismatch" reads like a corrupt download.
+#[derive(Error, Debug)]
+#[error(
+    "Hash mismatch for {name}@{version}: expected {expected}, got {actual}\n\
+     The `packageManager` hash covers {basis}, the artifact Corepack pins."
+)]
+pub struct PackageManagerHashMismatch {
+    pub name: Str,
+    pub version: Str,
+    pub expected: Str,
+    pub actual: Str,
+    pub basis: Str,
 }
