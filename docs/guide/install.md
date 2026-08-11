@@ -44,7 +44,7 @@ A `packageManager` pin can carry an integrity hash (`yarn@4.17.1+sha512.…`). `
 - the extracted CLI binary (`bin/yarn.js`) for Yarn 2 and later
 - the npm package tarball for npm, pnpm, and Yarn Classic
 
-Vite+ hashes the CLI once, when it installs Yarn, and records the pin it verified. A later command compares its own pin against that record. A pin that does not match the record fails the check, and the command stops.
+Vite+ hashes the CLI once, when it installs Yarn. It records the pin, the file size, and the modification time. A later command reads that record and the file status. Vite+ hashes the CLI again when the pin changed, when the file changed, or when the record is missing. A failed check stops the command.
 
 The explicit `packageManager` field (or the `devEngines.packageManager` declaration) also affects matching package-manager shims. If a project has `packageManager: "npm@10.9.4"`, `npm` and `npx` use npm 10.9.4. Other generated alias pairs behave the same way: `pnpm`/`pnpx`, `yarn`/`yarnpkg`, and `bun`/`bunx`. Mismatched tools are not translated; `npm` in a `pnpm` project still resolves as npm.
 

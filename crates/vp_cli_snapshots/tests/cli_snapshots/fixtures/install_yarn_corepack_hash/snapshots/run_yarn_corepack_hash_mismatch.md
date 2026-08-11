@@ -10,9 +10,9 @@ Ensure the Corepack-pinned Yarn version is not cached
 Cache the verified Yarn CLI
 
 
-## `vpt replace-file-content package.json b7ad4697 b7ad4698`
+## `vpt write-file $VP_HOME/package_manager/yarn/4.17.1/yarn/bin/yarn.js tampered`
 
-Change the pin to a hash that the cached CLI does not match
+Replace the cached CLI with content that the pin does not cover
 
 
 ## `vp run smoke`
@@ -24,6 +24,6 @@ vp run reports the integrity failure. It does not start the task
 ```
 VITE+ - The Unified Toolchain for the Web
 
-error: Hash mismatch for yarn@4.17.1: expected sha512.ccbfabf7d7b6b32075088be9386fb9a2e00bb6887ef07fa56effabc890a56d53da1ccc4128d62db245fcbd3961b236d75335bdf7d5320ed6eafb7588b7ad4698, got sha512.ccbfabf7d7b6b32075088be9386fb9a2e00bb6887ef07fa56effabc890a56d53da1ccc4128d62db245fcbd3961b236d75335bdf7d5320ed6eafb7588b7ad4697
+error: Hash mismatch for yarn@4.17.1: expected sha512.ccbfabf7d7b6b32075088be9386fb9a2e00bb6887ef07fa56effabc890a56d53da1ccc4128d62db245fcbd3961b236d75335bdf7d5320ed6eafb7588b7ad4697, got sha512.72e0305d3fcfcad84a03e7c1903e912162950491e6d0c7d0e236a04c1800815542cb763c9a251ad01c1c4d72d6aba9e92605e2ed97b463f6b908da58d8cb7870
 The `packageManager` hash covers the extracted Yarn CLI (bin/yarn.js). Corepack hashes the same artifact.
 ```
