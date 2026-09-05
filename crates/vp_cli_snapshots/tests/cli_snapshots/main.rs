@@ -20,8 +20,10 @@ mod flavor;
 mod redact;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, hash_map::DefaultHasher},
     ffi::OsString,
+    fs::{File, OpenOptions},
+    hash::{Hash, Hasher},
     io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
@@ -693,12 +695,28 @@ impl CaseHome {
             .envs(&env)
             .output()
             .map_err(|e| format!("failed to run `vp env setup`: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "`vp env setup` failed with status {}\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+
+        // Cases start from fresh-install consent. A dedicated first-use fixture
+        // removes this config before exercising upgrade compatibility.
+        let output = std::process::Command::new(vp)
+            .args(["env", "on", "pm"])
+            .env_clear()
+            .envs(&env)
+            .output()
+            .map_err(|e| format!("failed to run `vp env on pm`: {e}"))?;
         if output.status.success() {
             return Ok(());
         }
-
         Err(format!(
-            "`vp env setup` failed with status {}\nstdout:\n{}\nstderr:\n{}",
+            "`vp env on pm` failed with status {}\nstdout:\n{}\nstderr:\n{}",
             output.status,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
@@ -1437,8 +1455,8 @@ fn run_case(
         if step.snapshot || !succeeded {
             let mut redacted = redact_output(raw_output, &redactions, !step.formatted_snapshot);
             // A version-probe step's output is a bare semver that varies by
-            // environment (the managed Node's bundled npm or a
-            // corepack-resolved pin); mask it. Scoped by argv so
+            // environment (the managed Node's bundled npm or a package
+            // manager pin); mask it. Scoped by argv so
             // fixture-controlled bare versions elsewhere (a printed
             // `.node-version` file) stay assertable.
             let version_probe = matches!(argv.first().map(String::as_str), Some("npm" | "npx"))
@@ -1514,33 +1532,56 @@ fn run_case(
 /// on Linux: only the few signal-sensitive cases pay for serialization, while
 /// the rest parallelize as they already do on macOS and Windows.
 ///
-/// This coordinates threads within a single `cargo test` process, which is the
-/// Linux and macOS snapshot jobs and the only place the parallel-PTY
-/// signal-routing flakiness occurs. The Windows job runs the suite under
-/// `cargo nextest`, which executes each trial in its own process; there the
-/// gate is a no-op, but isolation is stronger for free — a signal-sensitive
-/// case already has its own process, PTY, and process group, which is exactly
-/// what this gate reconstructs for the shared-process case.
+/// The in-process lock coordinates the threads used by `cargo test`. A matching
+/// file lock coordinates the separate trial processes used by `cargo nextest`
+/// on Windows. The lock file name includes the checkout path so independent
+/// worktrees do not block each other.
 static EXECUTION_GATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 /// Held for a case's whole run: either a shared read lease (parallel) or the
 /// exclusive write lease (isolated). Poisoning is ignored — a case that
 /// panicked already failed, and its neighbours should still run.
 enum GateLease {
-    Shared(
-        #[expect(dead_code, reason = "held for its Drop")] std::sync::RwLockReadGuard<'static, ()>,
-    ),
-    Exclusive(
-        #[expect(dead_code, reason = "held for its Drop")] std::sync::RwLockWriteGuard<'static, ()>,
-    ),
+    Shared {
+        #[expect(dead_code, reason = "held for its Drop")]
+        thread: std::sync::RwLockReadGuard<'static, ()>,
+        #[expect(dead_code, reason = "held for its Drop")]
+        process: File,
+    },
+    Exclusive {
+        #[expect(dead_code, reason = "held for its Drop")]
+        thread: std::sync::RwLockWriteGuard<'static, ()>,
+        #[expect(dead_code, reason = "held for its Drop")]
+        process: File,
+    },
+}
+
+fn execution_gate_file() -> File {
+    let mut hasher = DefaultHasher::new();
+    flavor::repo_root().hash(&mut hasher);
+    let path = std::env::temp_dir()
+        .join(format!("vp-cli-snapshots-execution-{:016x}.lock", hasher.finish()));
+    OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .unwrap_or_else(|error| panic!("failed to open execution gate {}: {error}", path.display()))
 }
 
 fn acquire_gate(isolated: bool) -> GateLease {
     use std::sync::PoisonError;
     if isolated {
-        GateLease::Exclusive(EXECUTION_GATE.write().unwrap_or_else(PoisonError::into_inner))
+        let thread = EXECUTION_GATE.write().unwrap_or_else(PoisonError::into_inner);
+        let process = execution_gate_file();
+        File::lock(&process).expect("failed to lock the cross-process execution gate");
+        GateLease::Exclusive { thread, process }
     } else {
-        GateLease::Shared(EXECUTION_GATE.read().unwrap_or_else(PoisonError::into_inner))
+        let thread = EXECUTION_GATE.read().unwrap_or_else(PoisonError::into_inner);
+        let process = execution_gate_file();
+        File::lock_shared(&process).expect("failed to lock the cross-process execution gate");
+        GateLease::Shared { thread, process }
     }
 }
 

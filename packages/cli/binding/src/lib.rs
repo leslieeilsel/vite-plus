@@ -22,6 +22,8 @@ mod exec;
 // These modules export NAPI functions only called from JavaScript at runtime.
 // allow(dead_code) suppresses warnings in the test target which doesn't link NAPI.
 #[allow(dead_code)]
+mod js_command_args;
+#[allow(dead_code)]
 mod migration;
 #[allow(dead_code)]
 mod package_manager;
@@ -146,11 +148,16 @@ fn create_vite_config_resolver(
 }
 
 fn format_error_message(error: &(dyn StdError + 'static)) -> String {
-    let mut message = error.to_string();
+    let mut previous = error.to_string();
+    let mut message = previous.clone();
     let mut source = error.source();
 
     while let Some(current) = source {
-        let _ = write!(message, "\n* {current}");
+        let current_message = current.to_string();
+        if current_message != previous {
+            let _ = write!(message, "\n* {current_message}");
+        }
+        previous = current_message;
         source = current.source();
     }
 

@@ -387,11 +387,6 @@ jobs:
           - name: varlet
             node-version: 22
             command: |
-              # scripts/bootstrap.mjs spawns `pnpm build` via tinyexec and needs
-              # pnpm on PATH (not exposed by the vp install itself). corepack
-              # enable creates a pnpm launcher in the vp bin dir that resolves
-              # the project's pinned packageManager version (pnpm@9.15.9).
-              corepack enable
               node scripts/bootstrap.mjs
               # Report-only: oxlint 1.68.0 surfaces ts1038 ("A 'declare' modifier
               # cannot be used in an already ambient context.") on varlet's
@@ -404,6 +399,8 @@ jobs:
               vp run test:coverage
           - name: nuxt-devtools
             node-version: 24
+            # The Windows build can exceed Node's default old-space limit.
+            node-options: --max-old-space-size=4096
             command: |
               vp run build
               vp run typecheck
@@ -512,6 +509,8 @@ jobs:
 
       - name: Run vite-plus commands in ${{ matrix.project.name }}
         working-directory: ${{ runner.temp }}/vite-plus-ecosystem-ci/${{ matrix.project.name }}${{ matrix.project.directory && format('/{0}', matrix.project.directory) || '' }}
+        env:
+          NODE_OPTIONS: ${{ matrix.project.node-options || '' }}
         run: ${{ matrix.project.command }}
 
   notify-failure:
